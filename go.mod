@@ -2,7 +2,10 @@ module perf
 
 go 1.23.8
 
-require github.com/andygrunwald/go-jira v1.16.0
+require (
+	github.com/andygrunwald/go-jira v1.16.0
+	github.com/google/go-github/v72 v72.0.0
+)
 
 require (
 	github.com/fatih/structs v1.1.0 // indirect
