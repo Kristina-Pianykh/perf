@@ -1,0 +1,6 @@
+providers:
+  dotenv:
+    kind: dotenv
+    maps:
+      - id: local
+        path: .env
