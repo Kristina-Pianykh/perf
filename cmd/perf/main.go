@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
+	"perf/pkg/gh"
 	"perf/pkg/jirautils"
 )
 
@@ -15,6 +17,11 @@ func initLogger(w io.Writer, minimalLogLevel slog.Level) *slog.Logger {
 	})
 	return slog.New(handler)
 }
+
+const (
+	ORG      = "goflink"
+	USERNAME = "Kristina-Pianykh"
+)
 
 func main() {
 	out := os.Stdout
@@ -56,5 +63,22 @@ func main() {
 	// fmt.Printf("updated issues: %d\n", len(updatedIssues))
 	// fmt.Printf("created issues: %d\n", len(createdIssues))
 
-	_, err = jirautils.GetBoard(jiraClient)
+	// _, err = jirautils.GetBoard(jiraClient)
+
+	GhClient, err := gh.InitClient()
+	if err != nil {
+		fmt.Fprintf(out, "failed to create a GitHub client: %s", err.Error())
+		return
+	}
+
+	ctx := context.Background()
+	ticket := "DX-671"
+	prs, err := gh.GetPullRequestsByTicket(GhClient, ctx, ORG, ticket, USERNAME)
+	if err != nil {
+		fmt.Println(err.Error())
+	}
+
+	for _, pr := range prs {
+		fmt.Printf("%s\n", pr.String(true))
+	}
 }
