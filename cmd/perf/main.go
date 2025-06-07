@@ -72,13 +72,15 @@ func main() {
 	}
 
 	ctx := context.Background()
-	ticket := "DX-671"
-	prs, err := gh.GetPullRequestsByTicket(GhClient, ctx, ORG, ticket, USERNAME)
+	// ticket := "DX-671"
+	// prs, err := gh.GetPullRequestsByTicket(GhClient, ctx, ORG, ticket, USERNAME)
+	reviewsByPR, err := gh.GetReviewedPullRequests(GhClient, ctx, ORG, USERNAME)
 	if err != nil {
 		fmt.Println(err.Error())
 	}
 
-	for _, pr := range prs {
-		fmt.Printf("%s\n", pr.String(true))
+	for _, reviewByPR := range reviewsByPR {
+		fmt.Printf("%s\n", reviewByPR.String())
+		break
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -26,6 +27,7 @@ func (c *Commit) String(withChanges bool) string {
 }
 
 type PullRequest struct {
+	ID          int64
 	Owner       string
 	Repo        string
 	Author      string
@@ -34,17 +36,57 @@ type PullRequest struct {
 	Title       string
 	URL         string
 	Commits     []*Commit
+	Ticket      string
+}
+
+type ReviewsByPullRequest struct {
+	PullRequest *PullRequest
+	Reviews     []*Review
+	Comments    []*github.IssueComment
+}
+
+type Review struct {
+	// PullRequest *PullRequest
+	Summary  *github.PullRequestReview
+	Comments []*github.PullRequestComment
+}
+
+func (r *Review) String() string {
+	var builder strings.Builder
+
+	builder.WriteString(fmt.Sprintf("&Review{Summary: %v, ReviewComments: ", r.Summary))
+	for _, comment := range r.Comments {
+		builder.WriteString(fmt.Sprintf("%v", comment))
+	}
+	builder.WriteString("}")
+	return builder.String()
+}
+
+func (rByPR *ReviewsByPullRequest) String() string {
+	var builder strings.Builder
+
+	builder.WriteString(fmt.Sprintf("&ReviewsByPullRequest{PullRequest: %s, Reviews: ", rByPR.PullRequest.String(false)))
+	for _, review := range rByPR.Reviews {
+		builder.WriteString(review.String())
+	}
+	builder.WriteString(", Comments: ")
+
+	for _, comment := range rByPR.Comments {
+		builder.WriteString(fmt.Sprintf("%v", comment))
+	}
+	builder.WriteString("}")
+	return builder.String()
 }
 
 func (pr *PullRequest) String(verbose bool) string {
 	if !verbose {
-		return fmt.Sprintf("&PullRequest{Owner: %s, Repo: %s, Author: %s, Created: %s, Title: %s, URL: %s",
-			pr.Owner, pr.Repo, pr.Author, pr.Created.String(), pr.Title, pr.URL)
+		return fmt.Sprintf("&PullRequest{Owner: %s, Repo: %s, Author: %s, Created: %s, Title: %s, URL: %s, Ticket: %s",
+			pr.Owner, pr.Repo, pr.Author, pr.Created.String(), pr.Title, pr.URL, pr.Ticket)
 	}
 
 	var builder strings.Builder
-	str := fmt.Sprintf("&PullRequest{Owner: %s, Repo: %s, Author: %s, Created: %s, Description: %s, Title: %s, URL: %s, Commits: ",
-		pr.Owner, pr.Repo, pr.Author, pr.Created.String(), pr.Description, pr.Title, pr.URL)
+	str := fmt.Sprintf("&PullRequest{Owner: %s, Repo: %s, Author: %s, Created: %s, Description: %s, Title: %s, URL: %s, Ticket: %s Commits: ",
+		pr.Owner, pr.Repo, pr.Author, pr.Created.String(), pr.Description, pr.Title, pr.URL, pr.Ticket)
 	builder.WriteString(str)
 
 	for _, c := range pr.Commits {
@@ -75,7 +117,11 @@ func InitClient() (*github.Client, error) {
 }
 
 func GetPullRequestsByTicket(client *github.Client, ctx context.Context, org, ticket, user string) ([]*PullRequest, error) {
-	prs, err := GetOrgPullRequests(client, ctx, org, ticket, user)
+	opts := &github.SearchOptions{Sort: "created", Order: "desc"}
+	query := fmt.Sprintf("org:%s %s type:pr author:%s", org, ticket, user)
+	fmt.Printf("query: %q\n", query)
+
+	prs, err := GetOrgPullRequestsByQuery(client, ctx, query, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -84,7 +130,9 @@ func GetPullRequestsByTicket(client *github.Client, ctx context.Context, org, ti
 	for _, pr := range prs {
 		repo := getRepoName(pr.GetRepositoryURL())
 		owner := getOwner(pr.GetRepositoryURL())
+		ticket := getTicket(pr.GetTitle())
 		pullRequest := &PullRequest{
+			ID:          pr.GetID(),
 			Owner:       owner,
 			Repo:        repo,
 			Author:      pr.GetUser().GetLogin(),
@@ -92,6 +140,7 @@ func GetPullRequestsByTicket(client *github.Client, ctx context.Context, org, ti
 			Description: pr.GetBody(),
 			Title:       pr.GetTitle(),
 			URL:         pr.GetURL(),
+			Ticket:      ticket,
 		}
 
 		commits, err := GetCommitsByPullRequest(client, ctx, pullRequest)
@@ -105,20 +154,125 @@ func GetPullRequestsByTicket(client *github.Client, ctx context.Context, org, ti
 	return pullRequests, nil
 }
 
-func GetOrgPullRequests(client *github.Client, ctx context.Context, org, ticket, user string) ([]*github.Issue, error) {
-	opts := &github.SearchOptions{Sort: "created", Order: "asc"}
-	query := fmt.Sprintf("org:%s %s type:pr author:%s", org, ticket, user)
+func GetReviewsByPullRequest(client *github.Client, ctx context.Context, org, repo, user string, prNumber int) ([]*Review, error) {
+	GhReviews, err := GetPRReviews(client, ctx, org, repo, prNumber)
+	if err != nil {
+		return nil, err
+	}
+
+	reviews := []*Review{}
+	for _, GhReview := range GhReviews {
+		if GhReview.GetUser().GetLogin() != user {
+			continue
+		}
+
+		reviewComments, err := GetPRCommentsByReview(client, ctx, org, repo, prNumber, GhReview.GetID())
+		if err != nil {
+			return nil, err
+		}
+
+		reviews = append(reviews, &Review{Summary: GhReview, Comments: reviewComments})
+	}
+
+	return reviews, nil
+}
+
+func GetReviewedPullRequests(client *github.Client, ctx context.Context, org, user string) ([]*ReviewsByPullRequest, error) {
+	opts := &github.SearchOptions{Sort: "created", Order: "desc"}
+	query := fmt.Sprintf("org:%s is:pr commenter:%s -author:%s", org, user, user)
 	fmt.Printf("query: %q\n", query)
+
+	prs, err := GetOrgPullRequestsByQuery(client, ctx, query, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	reviewsByPR := []*ReviewsByPullRequest{}
+
+	for _, pr := range prs {
+		repo := getRepoName(pr.GetRepositoryURL())
+		owner := getOwner(pr.GetRepositoryURL())
+		ticket := getTicket(pr.GetTitle())
+		pr.GetID()
+
+		pullRequest := &PullRequest{
+			ID:          pr.GetID(),
+			Owner:       owner,
+			Repo:        repo,
+			Author:      pr.GetUser().GetLogin(),
+			Created:     pr.GetCreatedAt(),
+			Description: pr.GetBody(),
+			Title:       pr.GetTitle(),
+			URL:         pr.GetURL(),
+			Ticket:      ticket,
+		}
+
+		GhComments, err := GetPRComments(client, ctx, owner, repo, pr.GetNumber())
+		if err != nil {
+			return nil, err
+		}
+
+		comments := []*github.IssueComment{}
+		for _, comment := range GhComments {
+			if comment.GetUser().GetLogin() != user {
+				continue
+			}
+			comments = append(comments, comment)
+		}
+
+		// for i, comment := range comments {
+		// 	fmt.Printf("Comment %d: %v\n", i, comment)
+		// }
+
+		reviews, err := GetReviewsByPullRequest(client, ctx, owner, repo, user, pr.GetNumber())
+		if err != nil {
+			return nil, err
+		}
+
+		reviewsByPR = append(reviewsByPR, &ReviewsByPullRequest{PullRequest: pullRequest, Reviews: reviews, Comments: comments})
+	}
+
+	return reviewsByPR, nil
+}
+
+func GetPRCommentsByReview(client *github.Client, ctx context.Context, owner, repo string, prNumber int, reviewID int64) ([]*github.PullRequestComment, error) {
+	comments, _, err := client.PullRequests.ListReviewComments(ctx, owner, repo, prNumber, reviewID, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list comments for review ID %d in PR %d in %s/%s: %w", reviewID, prNumber, owner, repo, err)
+	}
+	return comments, nil
+}
+
+func GetPRComments(client *github.Client, ctx context.Context, owner, repo string, prNumber int) ([]*github.IssueComment, error) {
+	comments, _, err := client.Issues.ListComments(ctx, owner, repo, prNumber, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get comments for PR %d in %s/%s: %w", prNumber, owner, repo, err)
+	}
+	return comments, nil
+}
+
+func GetPRReviews(client *github.Client, ctx context.Context, owner, repo string, prNumber int) ([]*github.PullRequestReview, error) {
+	reviews, _, err := client.PullRequests.ListReviews(ctx, owner, repo, prNumber, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get comments for PR %d in %s/%s: %w", prNumber, owner, repo, err)
+	}
+	// for i, review := range reviews {
+	// 	fmt.Printf("%d: %v\n", i, review)
+	// }
+	return reviews, nil
+}
+
+func GetOrgPullRequestsByQuery(client *github.Client, ctx context.Context, query string, opts *github.SearchOptions) ([]*github.Issue, error) {
 	result, _, err := client.Search.Issues(ctx, query, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to search for PRs with query %s: %w", query, err)
 	}
 
-	fmt.Printf("total PR with ticket %s: %d\n", ticket, result.GetTotal())
+	fmt.Printf("total PRs: %d\n", result.GetTotal())
 
-	for _, res := range result.Issues {
-		fmt.Printf("found PR: %s\n", res.String())
-	}
+	// for _, res := range result.Issues {
+	// 	fmt.Printf("found PR: %s\n", res.String())
+	// }
 	return result.Issues, nil
 }
 
@@ -177,4 +331,10 @@ func getOwner(url string) string {
 	parts := strings.Split(url, "/")
 	owner := parts[len(parts)-2]
 	return owner
+}
+
+func getTicket(PRtitle string) string {
+	re := regexp.MustCompile(`[A-Z]{2,}\d{0,}-\d+`)
+	match := re.Find([]byte(PRtitle))
+	return string(match)
 }
