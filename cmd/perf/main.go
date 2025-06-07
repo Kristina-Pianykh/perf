@@ -8,6 +8,7 @@ import (
 	"os"
 	"perf/pkg/gh"
 	"perf/pkg/jirautils"
+	"time"
 )
 
 func initLogger(w io.Writer, minimalLogLevel slog.Level) *slog.Logger {
@@ -63,7 +64,11 @@ func main() {
 	// fmt.Printf("updated issues: %d\n", len(updatedIssues))
 	// fmt.Printf("created issues: %d\n", len(createdIssues))
 
-	// _, err = jirautils.GetBoard(jiraClient)
+	// tickets, err := jirautils.GetBoard(jiraClient)
+	// for _, ticket := range tickets {
+	// 	fmt.Printf("%s: %s\n", ticket.Key, ticket.Fields.Status)
+	//
+	// }
 
 	GhClient, err := gh.InitClient()
 	if err != nil {
@@ -71,16 +76,42 @@ func main() {
 		return
 	}
 
+	from := "2025-06-05"
+	to := "2025-06-07"
 	ctx := context.Background()
-	// ticket := "DX-671"
-	// prs, err := gh.GetPullRequestsByTicket(GhClient, ctx, ORG, ticket, USERNAME)
-	reviewsByPR, err := gh.GetReviewedPullRequests(GhClient, ctx, ORG, USERNAME)
+	ticket := "DX-75"
+	_, err = gh.GetPullRequestsByTicket(GhClient, ctx, ORG, ticket, USERNAME, from, to)
+	// reviewsByPR, err := gh.GetReviewedPullRequests(GhClient, ctx, ORG, USERNAME, from, to)
 	if err != nil {
 		fmt.Println(err.Error())
 	}
 
-	for _, reviewByPR := range reviewsByPR {
-		fmt.Printf("%s\n", reviewByPR.String())
-		break
-	}
+	// for _, pr := range prs {
+	// 	fmt.Printf("%s\n\n\n", pr.String(true))
+	// }
+
+	// for _, reviewByPR := range reviewsByPR {
+	// 	fmt.Printf("%s\n", reviewByPR.String())
+	// 	break
+	// }
+}
+
+func today() time.Time {
+	now := time.Now()
+	midnight := time.Date(
+		now.Year(), now.Month(), now.Day(),
+		0, 0, 0, 0,
+		now.Location(), // or time.UTC if you want UTC midnight
+	)
+	return midnight
+}
+
+func yesterday() time.Time {
+	now := time.Now()
+	yesterday := time.Date(
+		now.Year(), now.Month(), now.Day()-1,
+		0, 0, 0, 0,
+		now.Location(), // or time.UTC
+	)
+	return yesterday
 }
