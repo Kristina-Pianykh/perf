@@ -8,3 +8,6 @@ build: install
 
 run: build
 	teller run --reset --shell -- go run ./cmd/perf
+
+test:
+	teller run --reset --shell -- go test -v ./...
