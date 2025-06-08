@@ -119,45 +119,39 @@ func InitClient() (*github.Client, error) {
 
 func GetPullRequestsByTicket(client *github.Client, ctx context.Context, org, ticket, user, from, to string) ([]*PullRequest, error) {
 	opts := &github.SearchOptions{Sort: "created", Order: "desc"}
-	queries := []string{
-		fmt.Sprintf("org:%s %s type:pr author:%s created:%s..%s", org, ticket, user, from, to),
-		fmt.Sprintf("org:%s %s type:pr author:%s updated:%s..%s", org, ticket, user, from, to),
-	}
+	query := fmt.Sprintf("org:%s %s type:pr author:%s created:%s..%s updated:%s..%s", org, ticket, user, from, to, from, to)
+	fmt.Printf("query: %q\n", query)
 
 	pullRequests := []*PullRequest{}
 
-	for _, query := range queries {
-		fmt.Printf("query: %q\n", query)
+	prs, err := GetOrgPullRequestsByQuery(client, ctx, query, opts)
+	if err != nil {
+		return nil, err
+	}
 
-		prs, err := GetOrgPullRequestsByQuery(client, ctx, query, opts)
+	for _, pr := range prs {
+		repo := getRepoName(pr.GetRepositoryURL())
+		owner := getOwner(pr.GetRepositoryURL())
+		ticket := getTicket(pr.GetTitle())
+		pullRequest := &PullRequest{
+			ID:          pr.GetID(),
+			Number:      pr.GetNumber(),
+			Owner:       owner,
+			Repo:        repo,
+			Author:      pr.GetUser().GetLogin(),
+			Created:     pr.GetCreatedAt(),
+			Description: pr.GetBody(),
+			Title:       pr.GetTitle(),
+			URL:         pr.GetURL(),
+			Ticket:      ticket,
+		}
+
+		commits, err := GetCommitsByPullRequest(client, ctx, pullRequest)
 		if err != nil {
 			return nil, err
 		}
-
-		for _, pr := range prs {
-			repo := getRepoName(pr.GetRepositoryURL())
-			owner := getOwner(pr.GetRepositoryURL())
-			ticket := getTicket(pr.GetTitle())
-			pullRequest := &PullRequest{
-				ID:          pr.GetID(),
-				Number:      pr.GetNumber(),
-				Owner:       owner,
-				Repo:        repo,
-				Author:      pr.GetUser().GetLogin(),
-				Created:     pr.GetCreatedAt(),
-				Description: pr.GetBody(),
-				Title:       pr.GetTitle(),
-				URL:         pr.GetURL(),
-				Ticket:      ticket,
-			}
-
-			commits, err := GetCommitsByPullRequest(client, ctx, pullRequest)
-			if err != nil {
-				return nil, err
-			}
-			pullRequest.Commits = commits
-			pullRequests = append(pullRequests, pullRequest)
-		}
+		pullRequest.Commits = commits
+		pullRequests = append(pullRequests, pullRequest)
 	}
 
 	return pullRequests, nil
@@ -188,70 +182,64 @@ func GetReviewsByPullRequest(client *github.Client, ctx context.Context, org, re
 
 func GetReviewedPullRequests(client *github.Client, ctx context.Context, org, user, from, to string) (map[string]*ReviewsByPullRequest, error) {
 	opts := &github.SearchOptions{Sort: "created", Order: "desc"}
-	queries := []string{
-		fmt.Sprintf("org:%s is:pr commenter:%s -author:%s created:%s..%s", org, user, user, from, to),
-		fmt.Sprintf("org:%s is:pr commenter:%s -author:%s updated:%s..%s", org, user, user, from, to),
-	}
+	query := fmt.Sprintf("org:%s is:pr commenter:%s -author:%s created:%s..%s updated:%s..%s", org, user, user, from, to, from, to)
+	fmt.Printf("query: %q\n", query)
 
 	reviewsByPR := map[string]*ReviewsByPullRequest{}
 
-	for _, query := range queries {
-		fmt.Printf("query: %q\n", query)
+	prs, err := GetOrgPullRequestsByQuery(client, ctx, query, opts)
+	if err != nil {
+		return nil, err
+	}
 
-		prs, err := GetOrgPullRequestsByQuery(client, ctx, query, opts)
+	for _, pr := range prs {
+		repo := getRepoName(pr.GetRepositoryURL())
+		owner := getOwner(pr.GetRepositoryURL())
+		ticket := getTicket(pr.GetTitle())
+		pr.GetID()
+
+		pullRequest := &PullRequest{
+			ID:          pr.GetID(),
+			Number:      pr.GetNumber(),
+			Owner:       owner,
+			Repo:        repo,
+			Author:      pr.GetUser().GetLogin(),
+			Created:     pr.GetCreatedAt(),
+			Description: pr.GetBody(),
+			Title:       pr.GetTitle(),
+			URL:         pr.GetURL(),
+			Ticket:      ticket,
+		}
+
+		GhComments, err := GetPRComments(client, ctx, owner, repo, pr.GetNumber())
 		if err != nil {
 			return nil, err
 		}
 
-		for _, pr := range prs {
-			repo := getRepoName(pr.GetRepositoryURL())
-			owner := getOwner(pr.GetRepositoryURL())
-			ticket := getTicket(pr.GetTitle())
-			pr.GetID()
-
-			pullRequest := &PullRequest{
-				ID:          pr.GetID(),
-				Number:      pr.GetNumber(),
-				Owner:       owner,
-				Repo:        repo,
-				Author:      pr.GetUser().GetLogin(),
-				Created:     pr.GetCreatedAt(),
-				Description: pr.GetBody(),
-				Title:       pr.GetTitle(),
-				URL:         pr.GetURL(),
-				Ticket:      ticket,
+		comments := []*github.IssueComment{}
+		for _, comment := range GhComments {
+			if comment.GetUser().GetLogin() != user {
+				continue
 			}
+			comments = append(comments, comment)
+		}
 
-			GhComments, err := GetPRComments(client, ctx, owner, repo, pr.GetNumber())
-			if err != nil {
-				return nil, err
-			}
+		reviews, err := GetReviewsByPullRequest(client, ctx, owner, repo, user, pr.GetNumber())
+		if err != nil {
+			return nil, err
+		}
 
-			comments := []*github.IssueComment{}
-			for _, comment := range GhComments {
-				if comment.GetUser().GetLogin() != user {
-					continue
-				}
-				comments = append(comments, comment)
-			}
+		// TODO: check for malformed key with length 0
+		key := CreateMapKey(pullRequest.Author, pullRequest.Repo, pullRequest.Number)
+		fmt.Printf("key: %s\n", key)
 
-			reviews, err := GetReviewsByPullRequest(client, ctx, owner, repo, user, pr.GetNumber())
-			if err != nil {
-				return nil, err
-			}
-
-			// TODO: check for malformed key with length 0
-			key := CreateMapKey(pullRequest.Author, pullRequest.Repo, pullRequest.Number)
-			fmt.Printf("key: %s\n", key)
-
-			reviewByPR, exists := reviewsByPR[key]
-			if !exists {
-				reviewsByPR[key] = &ReviewsByPullRequest{PullRequest: pullRequest, Reviews: reviews, Comments: comments}
-			} else {
-				// TODO: deduplicate reviewByPR.Reviews and reviewByPR.Comments
-				reviewByPR.Reviews = append(reviewByPR.Reviews, reviews...)
-				reviewByPR.Comments = append(reviewByPR.Comments, comments...)
-			}
+		reviewByPR, exists := reviewsByPR[key]
+		if !exists {
+			reviewsByPR[key] = &ReviewsByPullRequest{PullRequest: pullRequest, Reviews: reviews, Comments: comments}
+		} else {
+			// TODO: deduplicate reviewByPR.Reviews and reviewByPR.Comments
+			reviewByPR.Reviews = append(reviewByPR.Reviews, reviews...)
+			reviewByPR.Comments = append(reviewByPR.Comments, comments...)
 		}
 	}
 
