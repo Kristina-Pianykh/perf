@@ -4,6 +4,8 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"strings"
+	"time"
 
 	"fmt"
 
@@ -13,6 +15,61 @@ import (
 var (
 	FilterAlreadyExistsError FilterAlreadyExists
 )
+
+type Board struct {
+	ToDo       []jira.Issue
+	InProgress []jira.Issue
+	InReview   []jira.Issue
+	Blocked    []jira.Issue
+	Done       []jira.Issue
+}
+
+type Ticket struct {
+	Key      string
+	Created  time.Time
+	Updated  time.Time
+	Assignee string
+	Creator  string
+	Reporter string
+	Title    string
+	Body     string
+	Status   string
+	Comments []*Comment
+}
+
+type Comment struct {
+	Author    string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+	Body      string
+}
+
+func (t *Ticket) String() string {
+	var builder strings.Builder
+	builder.WriteString("&Ticket{Key: " + t.Key)
+	builder.WriteString(fmt.Sprintf(", Created: %v,", t.Created))
+	builder.WriteString(fmt.Sprintf("Updated: %v,", t.Updated))
+	builder.WriteString("Assignee: " + t.Assignee)
+	builder.WriteString(", Creator: " + t.Creator)
+	builder.WriteString(", Reporter: " + t.Reporter)
+	builder.WriteString(", Title: \"" + t.Title + "\"")
+	builder.WriteString(", Status: " + t.Status)
+	builder.WriteString(", Body: \"" + t.Body + "\"")
+	builder.WriteString(", Comments: {")
+	for _, comment := range t.Comments {
+		builder.WriteString(fmt.Sprintf("%s,", comment.String()))
+	}
+	if len(t.Comments) > 0 {
+		builder.WriteString("}")
+	} else {
+		builder.WriteString("}}")
+	}
+	return builder.String()
+}
+
+func (c *Comment) String() string {
+	return fmt.Sprintf("&Comment{Author: %s, CreatedAt: %v, UpdatedAt: %v, Body: %s}", c.Author, c.CreatedAt, c.UpdatedAt, c.Body)
+}
 
 type FilterAlreadyExists struct {
 	name string
@@ -38,6 +95,18 @@ func GetIssues(client *jira.Client, filter *jira.Filter) ([]jira.Issue, error) {
 		fmt.Printf("ID: %s\n", is.Key)
 	}
 	return issues, nil
+}
+
+func GetIssue(client *jira.Client, key string) (*jira.Issue, error) {
+	// TODO: specify options for specific fields, by default it pulls all of them
+	opts := &jira.GetQueryOptions{
+		Fields: "assignee,creator,reporter,summary,description,comment,created,updated,status",
+	}
+	issue, _, err := client.Issue.Get(key, opts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch ticket with key %s: %w", key, err)
+	}
+	return issue, nil
 }
 
 func GetProjectId(jiraClient *jira.Client, projectName string) string {
@@ -76,6 +145,24 @@ func InitJiraClient() (*jira.Client, error) {
 	}
 	client, err := jira.NewClient(tp.Client(), domain)
 	return client, err
+}
+
+func DeleteFilter(client *jira.Client, filterID string) error {
+	url := "/rest/api/3/filter/" + filterID
+	req, err := client.NewRequest("DEL", url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to prepare a DEL request to %s to delete filter with ID %s: %w", url, filterID, err)
+	}
+
+	resp, err := client.Do(req, nil)
+	if err != nil {
+		return fmt.Errorf("an API error: failed to process DEL request to %s to delete filter with ID %s: %w",
+			url, filterID, err)
+	}
+	if resp.StatusCode != 204 {
+		return fmt.Errorf("[%d] failed to delete filter with ID %s", resp.StatusCode, filterID)
+	}
+	return nil
 }
 
 func FilterExists(client *jira.Client, filterName string) (*jira.Filter, error) {
@@ -117,7 +204,12 @@ func CreateFilter(client *jira.Client, filterName, jql string) (*jira.Filter, er
 		return nil, err
 	}
 
+	// recreate filter by deleting an existing one with the same name
 	if filter != nil {
+		// err := DeleteFilter(client, filter.ID)
+		// if err != nil {
+		// 	return nil, err
+		// }
 		return filter, nil
 	}
 
@@ -138,16 +230,8 @@ func CreateFilter(client *jira.Client, filterName, jql string) (*jira.Filter, er
 	return filter, nil
 }
 
-type Board struct {
-	ToDo       []jira.Issue
-	InProgress []jira.Issue
-	InReview   []jira.Issue
-	Blocked    []jira.Issue
-	Done       []jira.Issue
-}
-
-func GetBoard(client *jira.Client) ([]jira.Issue, error) {
-	allTickets := []jira.Issue{}
+func GetBoard(client *jira.Client) ([]*Ticket, error) {
+	allTickets := []*Ticket{}
 
 	filterNames := []string{
 		"Selected for Development",
@@ -164,21 +248,90 @@ func GetBoard(client *jira.Client) ([]jira.Issue, error) {
 
 		filter, err := CreateFilter(client, name, jql)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create a filter for %s tickets: %s", name, err.Error())
+			return nil, fmt.Errorf("failed to create a filter for %s tickets: %w", name, err)
 		}
-		tickets, err := GetIssues(client, filter)
+		issues, err := GetIssues(client, filter)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get issues for filter %s: %s", filter.Name, err.Error())
 		}
-		slog.Info("", slog.String("filter", filter.Name), slog.Int("ticket", len(tickets)))
+		slog.Info("", slog.String("filter", filter.Name), slog.Int("ticket", len(issues)))
 
-		for _, ticket := range tickets {
-			slog.Debug("", slog.String("filter", filter.Name), slog.String("ticket", ticket.Key))
+		for _, issue := range issues {
+			slog.Debug("", slog.String("filter", filter.Name), slog.String("ticket", issue.Key))
+			jIssue, err := GetIssue(client, issue.Key)
+			// raw, _ := json.MarshalIndent(jIssue.Fields, "", "  ")
+			// fmt.Println(string(raw))
+
+			if err != nil {
+				return nil, err
+			}
+			ticket, err := newTicket(jIssue)
+			if err != nil {
+				return nil, err
+			}
+
+			allTickets = append(allTickets, ticket)
 		}
 
-		allTickets = append(allTickets, tickets...)
 	}
 	slog.Info("", slog.Int("total tickets", len(allTickets)))
 
 	return allTickets, nil
+}
+
+func newTicket(jIssue *jira.Issue) (*Ticket, error) {
+	ticket := Ticket{
+		Key:      jIssue.Key,
+		Created:  time.Time(jIssue.Fields.Created),
+		Updated:  time.Time(jIssue.Fields.Updated),
+		Assignee: jIssue.Fields.Assignee.DisplayName,
+		Creator:  jIssue.Fields.Creator.DisplayName,
+		Reporter: jIssue.Fields.Reporter.DisplayName,
+		Title:    jIssue.Fields.Summary,
+		Status:   jIssue.Fields.Status.Name,
+		Body:     jIssue.Fields.Description,
+	}
+
+	if jIssue.Fields.Comments != nil {
+		if len(jIssue.Fields.Comments.Comments) > 0 {
+			comments := []*Comment{}
+			for _, c := range jIssue.Fields.Comments.Comments {
+				comment, err := newComment(c)
+				if err != nil {
+					return nil, err
+				}
+				comments = append(comments, comment)
+			}
+			ticket.Comments = comments
+		}
+	}
+	return &ticket, nil
+}
+
+func newComment(c *jira.Comment) (*Comment, error) {
+	createdAt, err := parseJiraTime(c.Created)
+	if err != nil {
+		return nil, err
+	}
+	updatedAt, err := parseJiraTime(c.Updated)
+	if err != nil {
+		return nil, err
+	}
+
+	comment := Comment{
+		Author:    c.Author.Name,
+		CreatedAt: createdAt,
+		UpdatedAt: updatedAt,
+		Body:      c.Body,
+	}
+	return &comment, nil
+}
+
+func parseJiraTime(t string) (time.Time, error) {
+	const jiraLayout = "2006-01-02T15:04:05.000-0700"
+	parsed, err := time.Parse(jiraLayout, t)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("failed to parse %s into time.Time: %w", t, err)
+	}
+	return parsed, nil
 }
