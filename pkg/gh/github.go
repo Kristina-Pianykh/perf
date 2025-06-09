@@ -120,7 +120,7 @@ func InitClient() (*github.Client, error) {
 func GetPullRequestsByDate(client *github.Client, ctx context.Context, org, user, from, to string) ([]*PullRequest, error) {
 	opts := &github.SearchOptions{Sort: "created", Order: "desc"}
 	query := fmt.Sprintf("org:%s type:pr author:%s created:%s..%s updated:%s..%s", org, user, from, to, from, to)
-	fmt.Printf("query: %q\n", query)
+	// fmt.Printf("query: %q\n", query)
 
 	pullRequests := []*PullRequest{}
 
@@ -187,7 +187,7 @@ func GetReviewsByPullRequest(client *github.Client, ctx context.Context, org, re
 func GetReviewedPullRequests(client *github.Client, ctx context.Context, org, user, from, to string) (map[string]*ReviewsByPullRequest, error) {
 	opts := &github.SearchOptions{Sort: "created", Order: "desc"}
 	query := fmt.Sprintf("org:%s is:pr commenter:%s -author:%s created:%s..%s updated:%s..%s", org, user, user, from, to, from, to)
-	fmt.Printf("query: %q\n", query)
+	// fmt.Printf("query: %q\n", query)
 
 	reviewsByPR := map[string]*ReviewsByPullRequest{}
 
@@ -235,7 +235,7 @@ func GetReviewedPullRequests(client *github.Client, ctx context.Context, org, us
 
 		// TODO: check for malformed key with length 0
 		key := CreateMapKey(pullRequest.Author, pullRequest.Repo, pullRequest.Number)
-		fmt.Printf("key: %s\n", key)
+		// fmt.Printf("key: %s\n", key)
 
 		reviewByPR, exists := reviewsByPR[key]
 		if !exists {
@@ -300,7 +300,7 @@ func GetOrgPullRequestsByQuery(client *github.Client, ctx context.Context, query
 		return nil, fmt.Errorf("failed to search for PRs with query %s: %w", query, err)
 	}
 
-	fmt.Printf("total PRs: %d\n", result.GetTotal())
+	// fmt.Printf("total PRs: %d\n", result.GetTotal())
 
 	// for _, res := range result.Issues {
 	// 	fmt.Printf("found PR: %s\n", res.String())

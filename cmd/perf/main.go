@@ -9,6 +9,8 @@ import (
 	"os"
 	"perf/pkg/gh"
 	"perf/pkg/jirautils"
+	"perf/pkg/openai"
+	"strings"
 	"time"
 )
 
@@ -93,20 +95,32 @@ func main() {
 		log.Fatal(err)
 	}
 
-	fmt.Printf("Individual contributions by Jira Ticket\n")
+	var inputBuilder strings.Builder
+	inputBuilder.WriteString("Individual contributions by Jira Ticket\n")
 	for key, ticket := range relevantTickets {
-		fmt.Printf("TICKET [%s]: %s\n\n", key, ticket)
+		inputBuilder.WriteString(fmt.Sprintf("TICKET [%s]: %s\n\n", key, ticket))
 	}
 
 	reviewsByPR, err := gh.GetReviewedPullRequests(ghClient, ctx, ORG, USERNAME, from, to)
 	if err != nil {
-		fmt.Println(err.Error())
+		log.Fatal(err)
 	}
 
-	fmt.Printf("\n\n\nRevewed Pull Requests\n")
+	inputBuilder.WriteString("\n\nReveiwed Pull Requests\n")
 	for _, reviewByPR := range reviewsByPR {
-		fmt.Printf("%s\n", reviewByPR.String())
+		inputBuilder.WriteString(reviewByPR.String())
 	}
+
+	aiClient, err := openai.InitClient()
+	if err != nil {
+		log.Fatal(err)
+	}
+	input := inputBuilder.String()
+	output, err := openai.Complete(aiClient, context.Background(), &input)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(*output)
 }
 
 func today() time.Time {

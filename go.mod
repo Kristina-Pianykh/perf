@@ -5,6 +5,7 @@ go 1.23.8
 require (
 	github.com/andygrunwald/go-jira v1.16.0
 	github.com/google/go-github/v72 v72.0.0
+	github.com/openai/openai-go v1.3.0
 	github.com/stretchr/testify v1.10.0
 )
 
@@ -13,7 +14,6 @@ require (
 	github.com/fatih/structs v1.1.0 // indirect
 	github.com/golang-jwt/jwt/v4 v4.4.2 // indirect
 	github.com/google/go-querystring v1.1.0 // indirect
-	github.com/openai/openai-go v1.3.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/tidwall/gjson v1.14.4 // indirect

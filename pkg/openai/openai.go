@@ -47,7 +47,7 @@ func readFile(path string) (*string, error) {
 }
 
 func Complete(client *openai.Client, ctx context.Context, input *string) (*string, error) {
-	prompt, err := readFile("./prompt")
+	prompt, err := readFile("/Users/kristina.pianykh@goflink.com/flink/perf/pkg/openai/prompt")
 	if err != nil {
 		return nil, err
 	}
