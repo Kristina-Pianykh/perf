@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"log/slog"
 	"os"
 	"perf/pkg/gh"
@@ -65,12 +66,15 @@ func main() {
 	// fmt.Printf("created issues: %d\n", len(createdIssues))
 
 	// tickets, err := jirautils.GetBoard(jiraClient)
-	// for _, ticket := range tickets {
-	// 	fmt.Printf("%s: %s\n", ticket.Key, ticket.Fields.Status)
+	// if err != nil {
+	// 	fmt.Printf("%s", err.Error())
+	// }
 	//
+	// for _, ticket := range tickets {
+	// 	fmt.Printf("Ticket: %s\n\n\n", ticket.String())
 	// }
 
-	GhClient, err := gh.InitClient()
+	ghClient, err := gh.InitClient()
 	if err != nil {
 		fmt.Fprintf(out, "failed to create a GitHub client: %s", err.Error())
 		return
@@ -79,21 +83,30 @@ func main() {
 	from := "2025-06-05"
 	to := "2025-06-07"
 	ctx := context.Background()
-	ticket := "DX-75"
-	_, err = gh.GetPullRequestsByTicket(GhClient, ctx, ORG, ticket, USERNAME, from, to)
-	// reviewsByPR, err := gh.GetReviewedPullRequests(GhClient, ctx, ORG, USERNAME, from, to)
+	prs, err := gh.GetPullRequestsByDate(ghClient, ctx, ORG, USERNAME, from, to)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	relevantTickets, err := jirautils.AggPullRequestsByTicket(jiraClient, prs)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Printf("Individual contributions by Jira Ticket\n")
+	for key, ticket := range relevantTickets {
+		fmt.Printf("TICKET [%s]: %s\n\n", key, ticket)
+	}
+
+	reviewsByPR, err := gh.GetReviewedPullRequests(ghClient, ctx, ORG, USERNAME, from, to)
 	if err != nil {
 		fmt.Println(err.Error())
 	}
 
-	// for _, pr := range prs {
-	// 	fmt.Printf("%s\n\n\n", pr.String(true))
-	// }
-
-	// for _, reviewByPR := range reviewsByPR {
-	// 	fmt.Printf("%s\n", reviewByPR.String())
-	// 	break
-	// }
+	fmt.Printf("\n\n\nRevewed Pull Requests\n")
+	for _, reviewByPR := range reviewsByPR {
+		fmt.Printf("%s\n", reviewByPR.String())
+	}
 }
 
 func today() time.Time {

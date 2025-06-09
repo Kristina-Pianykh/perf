@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"perf/pkg/gh"
 	"strings"
 	"time"
 
@@ -25,16 +26,17 @@ type Board struct {
 }
 
 type Ticket struct {
-	Key      string
-	Created  time.Time
-	Updated  time.Time
-	Assignee string
-	Creator  string
-	Reporter string
-	Title    string
-	Body     string
-	Status   string
-	Comments []*Comment
+	Key          string
+	Created      time.Time
+	Updated      time.Time
+	Assignee     string
+	Creator      string
+	Reporter     string
+	Title        string
+	Body         string
+	Status       string
+	PullRequests []*gh.PullRequest
+	Comments     []*Comment
 }
 
 type Comment struct {
@@ -42,6 +44,26 @@ type Comment struct {
 	CreatedAt time.Time
 	UpdatedAt time.Time
 	Body      string
+}
+
+// TODO: unit test?
+func (t *Ticket) AddPullRequest(pr *gh.PullRequest) {
+	if t.PullRequests == nil {
+		t.PullRequests = []*gh.PullRequest{pr}
+		return
+	}
+
+	if len(t.PullRequests) == 0 {
+		t.PullRequests = append(t.PullRequests, pr)
+		return
+	}
+
+	for _, existingPr := range t.PullRequests {
+		if existingPr.ID == pr.ID {
+			return
+		}
+	}
+	t.PullRequests = append(t.PullRequests, pr)
 }
 
 func (t *Ticket) String() string {
@@ -59,11 +81,12 @@ func (t *Ticket) String() string {
 	for _, comment := range t.Comments {
 		builder.WriteString(fmt.Sprintf("%s,", comment.String()))
 	}
-	if len(t.Comments) > 0 {
-		builder.WriteString("}")
-	} else {
-		builder.WriteString("}}")
+
+	builder.WriteString("}, &PullRequests: {")
+	for _, pr := range t.PullRequests {
+		builder.WriteString(pr.String(true))
 	}
+	builder.WriteString("}")
 	return builder.String()
 }
 
@@ -107,6 +130,19 @@ func GetIssue(client *jira.Client, key string) (*jira.Issue, error) {
 		return nil, fmt.Errorf("failed to fetch ticket with key %s: %w", key, err)
 	}
 	return issue, nil
+}
+
+func GetTicketByKey(client *jira.Client, key string) (*Ticket, error) {
+	jIssue, err := GetIssue(client, key)
+	if err != nil {
+		return nil, err
+	}
+
+	ticket, err := newTicket(jIssue)
+	if err != nil {
+		return nil, err
+	}
+	return ticket, nil
 }
 
 func GetProjectId(jiraClient *jira.Client, projectName string) string {
@@ -258,14 +294,8 @@ func GetBoard(client *jira.Client) ([]*Ticket, error) {
 
 		for _, issue := range issues {
 			slog.Debug("", slog.String("filter", filter.Name), slog.String("ticket", issue.Key))
-			jIssue, err := GetIssue(client, issue.Key)
-			// raw, _ := json.MarshalIndent(jIssue.Fields, "", "  ")
-			// fmt.Println(string(raw))
 
-			if err != nil {
-				return nil, err
-			}
-			ticket, err := newTicket(jIssue)
+			ticket, err := GetTicketByKey(client, issue.Key)
 			if err != nil {
 				return nil, err
 			}
@@ -334,4 +364,23 @@ func parseJiraTime(t string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("failed to parse %s into time.Time: %w", t, err)
 	}
 	return parsed, nil
+}
+
+func AggPullRequestsByTicket(client *jira.Client, prs []*gh.PullRequest) (map[string]*Ticket, error) {
+	relevantTickets := map[string]*Ticket{}
+
+	for _, pr := range prs {
+		if ticket, exists := relevantTickets[pr.Ticket]; exists {
+			ticket.AddPullRequest(pr)
+			continue
+		}
+
+		ticket, err := GetTicketByKey(client, pr.Ticket)
+		if err != nil {
+			return nil, err
+		}
+		ticket.AddPullRequest(pr)
+		relevantTickets[pr.Ticket] = ticket
+	}
+	return relevantTickets, nil
 }

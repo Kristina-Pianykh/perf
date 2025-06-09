@@ -117,9 +117,9 @@ func InitClient() (*github.Client, error) {
 	return client, nil
 }
 
-func GetPullRequestsByTicket(client *github.Client, ctx context.Context, org, ticket, user, from, to string) ([]*PullRequest, error) {
+func GetPullRequestsByDate(client *github.Client, ctx context.Context, org, user, from, to string) ([]*PullRequest, error) {
 	opts := &github.SearchOptions{Sort: "created", Order: "desc"}
-	query := fmt.Sprintf("org:%s %s type:pr author:%s created:%s..%s updated:%s..%s", org, ticket, user, from, to, from, to)
+	query := fmt.Sprintf("org:%s type:pr author:%s created:%s..%s updated:%s..%s", org, user, from, to, from, to)
 	fmt.Printf("query: %q\n", query)
 
 	pullRequests := []*PullRequest{}
@@ -133,6 +133,10 @@ func GetPullRequestsByTicket(client *github.Client, ctx context.Context, org, ti
 		repo := getRepoName(pr.GetRepositoryURL())
 		owner := getOwner(pr.GetRepositoryURL())
 		ticket := getTicket(pr.GetTitle())
+		if len(ticket) == 0 {
+			// no ticket is present in the PR title. Skip processing
+			continue
+		}
 		pullRequest := &PullRequest{
 			ID:          pr.GetID(),
 			Number:      pr.GetNumber(),
