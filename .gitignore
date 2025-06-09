@@ -32,4 +32,4 @@ go.work.sum
 # Build directory
 build
 
-prompt
+**/prompt
