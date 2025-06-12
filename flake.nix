@@ -24,6 +24,7 @@
 
           # misc
           teller
+          rclone
         ];
       };
       formatter.${system} = pkgs.alejandra;
