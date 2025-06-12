@@ -11,3 +11,7 @@ run: build
 
 test:
 	teller run --reset --shell -- go test -v ./...
+
+sync:
+	rclone sync log.md drive:perf/
+	rclone sync pkg/openai/prompt drive:perf/
