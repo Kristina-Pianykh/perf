@@ -1,6 +1,8 @@
 package jirautils
 
 import (
+	"bytes"
+	"encoding/json"
 	"log/slog"
 	"net/url"
 	"os"
@@ -16,6 +18,11 @@ import (
 var (
 	FilterAlreadyExistsError FilterAlreadyExists
 )
+
+type Filter struct {
+	Name string
+	Jql  string
+}
 
 type Board struct {
 	ToDo       []jira.Issue
@@ -44,6 +51,37 @@ type Comment struct {
 	CreatedAt time.Time
 	UpdatedAt time.Time
 	Body      string
+}
+
+type ChangelogItem struct {
+	Ticket  *Ticket
+	Changes []*Change
+}
+
+type Change struct {
+	Field string
+	From  string
+	To    string
+}
+
+func (c *Change) String() string {
+	return fmt.Sprintf("&Change{%s changed from %s to %s}", c.Field, c.From, c.To)
+}
+
+func (cli *ChangelogItem) String() string {
+	var builder strings.Builder
+	builder.WriteString(fmt.Sprintf("&ChangelogItem:{Ticket: %s, Changes: ", cli.Ticket.String()))
+
+	if len(cli.Changes) == 0 {
+		builder.WriteString("{}")
+	} else {
+		for _, change := range cli.Changes {
+			builder.WriteString(change.String())
+			builder.WriteString(",")
+		}
+	}
+	builder.WriteString("}")
+	return builder.String()
 }
 
 // TODO: unit test?
@@ -106,8 +144,8 @@ func (e FilterAlreadyExists) Error() string {
 	return fmt.Sprintf("filter with name '%s' already exists", e.name)
 }
 
-func GetIssues(client *jira.Client, filter *jira.Filter) ([]jira.Issue, error) {
-	issues, _, err := client.Issue.Search(filter.Jql, nil)
+func GetIssues(client *jira.Client, filter *jira.Filter, opts *jira.SearchOptions) ([]jira.Issue, error) {
+	issues, _, err := client.Issue.Search(filter.Jql, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -155,7 +193,6 @@ func GetProjectId(jiraClient *jira.Client, projectName string) string {
 	if projects != nil {
 		for _, l := range *projects {
 			if l.Name == projectName {
-				fmt.Printf("found %s\n", projectName)
 				projectId = l.ID
 				break
 			}
@@ -201,7 +238,7 @@ func DeleteFilter(client *jira.Client, filterID string) error {
 	return nil
 }
 
-func FilterExists(client *jira.Client, filterName string) (*jira.Filter, error) {
+func GetFilter(client *jira.Client, filterName string) (*jira.Filter, error) {
 	var result struct {
 		Total   int            `json:"total"`
 		Filters []*jira.Filter `json:"values"`
@@ -235,35 +272,59 @@ func FilterExists(client *jira.Client, filterName string) (*jira.Filter, error) 
 }
 
 func CreateFilter(client *jira.Client, filterName, jql string) (*jira.Filter, error) {
-	filter, err := FilterExists(client, filterName)
+	filter, err := GetFilter(client, filterName)
 	if err != nil {
 		return nil, err
 	}
 
-	// recreate filter by deleting an existing one with the same name
 	if filter != nil {
-		// err := DeleteFilter(client, filter.ID)
-		// if err != nil {
-		// 	return nil, err
-		// }
 		return filter, nil
 	}
 
 	payload := map[string]string{
-		"description": "Get all created issues for today",
-		"jql":         jql,
-		"name":        filterName,
+		"jql":  jql,
+		"name": filterName,
 	}
 	req, _ := client.NewRequest("POST", "/rest/api/3/filter", payload)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
 
 	filter = new(jira.Filter)
+	// fmt.Printf("req: %v\n", req)
+	buf := new(bytes.Buffer)
+	json.NewEncoder(buf).Encode(payload)
+	fmt.Println("JSON payload:", buf.String())
+
 	_, err = client.Do(req, filter)
 	if err != nil {
 		return nil, err
 	}
 	return filter, nil
+}
+
+func GetTicketsByFilter(client *jira.Client, filter *Filter) ([]*Ticket, error) {
+	jFilter, err := CreateFilter(client, filter.Name, filter.Jql)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create a filter for %s tickets: %w", filter.Name, err)
+	}
+	issues, err := GetIssues(client, jFilter, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get issues for filter %s: %s", jFilter.Name, err.Error())
+	}
+	// slog.Info("", slog.String("filter", jFilter.Name), slog.Int("ticket", len(issues)))
+
+	allTickets := []*Ticket{}
+	for _, issue := range issues {
+		// slog.Debug("", slog.String("filter", jFilter.Name), slog.String("ticket", issue.Key))
+
+		ticket, err := GetTicketByKey(client, issue.Key)
+		if err != nil {
+			return nil, err
+		}
+
+		allTickets = append(allTickets, ticket)
+	}
+	return allTickets, nil
 }
 
 func GetBoard(client *jira.Client) ([]*Ticket, error) {
@@ -280,34 +341,78 @@ func GetBoard(client *jira.Client) ([]*Ticket, error) {
 	}
 
 	for _, name := range filterNames {
-		jql := fmt.Sprintf("project = DX AND type IN (standardIssueTypes(), subTaskIssueTypes()) AND assignee = currentUser() AND status = \"%s\" ORDER BY created DESC", name)
+		f := Filter{
+			Name: name,
+			Jql:  fmt.Sprintf("project = DX AND type IN (standardIssueTypes(), subTaskIssueTypes()) AND assignee = currentUser() AND status = \"%s\" ORDER BY created DESC", name),
+		}
 
-		filter, err := CreateFilter(client, name, jql)
+		tickets, err := GetTicketsByFilter(client, &f)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create a filter for %s tickets: %w", name, err)
-		}
-		issues, err := GetIssues(client, filter)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get issues for filter %s: %s", filter.Name, err.Error())
-		}
-		slog.Info("", slog.String("filter", filter.Name), slog.Int("ticket", len(issues)))
-
-		for _, issue := range issues {
-			slog.Debug("", slog.String("filter", filter.Name), slog.String("ticket", issue.Key))
-
-			ticket, err := GetTicketByKey(client, issue.Key)
-			if err != nil {
-				return nil, err
-			}
-
-			allTickets = append(allTickets, ticket)
+			return nil, err
 		}
 
+		allTickets = append(allTickets, tickets...)
 	}
+
 	slog.Info("", slog.Int("total tickets", len(allTickets)))
 
 	return allTickets, nil
 }
+
+// func GetUpdatedTickets(client *jira.Client, from, to, user string) ([]*ChangelogItem, error) {
+// 	jql := fmt.Sprintf("project = DX AND updated >= \"%s\" AND updated < \"%s\" AND assignee = \"Kristina Pianykh\"", from, to)
+// 	fmt.Printf("jql: %s\n", jql)
+// 	filterName := "updatedToday"
+//
+// 	filter, err := CreateFilter(client, filterName, jql)
+// 	if err != nil {
+// 		return nil, fmt.Errorf("failed to create a filter for %s tickets: %w", filterName, err)
+// 	}
+// 	issues, err := GetIssues(client, filter, &jira.SearchOptions{Expand: "changelog"})
+// 	if err != nil {
+// 		return nil, fmt.Errorf("failed to get issues for filter %s: %s", filter.Name, err.Error())
+// 	}
+// 	// slog.Info("", slog.String("filter", filter.Name), slog.Int("ticket", len(issues)))
+//
+// 	changelog := []*ChangelogItem{}
+//
+// 	for _, issue := range issues {
+// 		// slog.Debug("", slog.String("filter", filter.Name), slog.String("ticket", issue.Key))
+// 		// fmt.Printf("%v\n", issue.Changelog.Histories)
+//
+// 		if len(issue.Changelog.Histories) == 0 {
+// 			continue
+// 		}
+//
+// 		ticket, err := GetTicketByKey(client, issue.Key)
+// 		if err != nil {
+// 			return nil, err
+// 		}
+//
+// 		changes := []*Change{}
+//
+// 		for _, history := range (*issue.Changelog).Histories {
+// 			for _, item := range history.Items {
+//
+// 				if strings.ToLower(item.Field) == "description" && history.Author.DisplayName != user {
+// 					continue
+// 				}
+//
+// 				if slices.Contains([]string{"rank", "link", "fix version", "issueparentassociation", "assignee", "remoteissuelink", "labels"}, strings.ToLower(item.Field)) {
+// 					continue
+// 				}
+//
+// 				// fmt.Printf("%v\n", item)
+// 				change := Change{Field: item.Field, From: item.FromString, To: item.ToString}
+// 				changes = append(changes, &change)
+// 			}
+// 		}
+//
+// 		changelogItem := ChangelogItem{Ticket: ticket, Changes: changes}
+// 		changelog = append(changelog, &changelogItem)
+// 	}
+// 	return changelog, nil
+// }
 
 func newTicket(jIssue *jira.Issue) (*Ticket, error) {
 	ticket := Ticket{

@@ -119,59 +119,82 @@ func InitClient() (*github.Client, error) {
 
 func GetPullRequestsByDate(client *github.Client, ctx context.Context, org, user, from, to string) ([]*PullRequest, error) {
 	opts := &github.SearchOptions{Sort: "created", Order: "desc"}
-	query := fmt.Sprintf("org:%s type:pr author:%s created:%s..%s updated:%s..%s", org, user, from, to, from, to)
-	// fmt.Printf("query: %q\n", query)
+	queries := []string{
+		fmt.Sprintf("org:%s type:pr author:%s created:%s..%s", org, user, from, to),
+		fmt.Sprintf("org:%s type:pr author:%s -created:%s..%s updated:%s..%s", org, user, from, to, from, to),
+	}
 
 	pullRequests := []*PullRequest{}
 
-	prs, err := GetOrgPullRequestsByQuery(client, ctx, query, opts)
-	if err != nil {
-		return nil, err
-	}
+	for _, query := range queries {
+		// fmt.Printf("query: %q\n", query)
 
-	for _, pr := range prs {
-		repo := getRepoName(pr.GetRepositoryURL())
-		owner := getOwner(pr.GetRepositoryURL())
-		ticket := getTicket(pr.GetTitle())
-		if len(ticket) == 0 {
-			// no ticket is present in the PR title. Skip processing
-			continue
-		}
-		pullRequest := &PullRequest{
-			ID:          pr.GetID(),
-			Number:      pr.GetNumber(),
-			Owner:       owner,
-			Repo:        repo,
-			Author:      pr.GetUser().GetLogin(),
-			Created:     pr.GetCreatedAt(),
-			Description: pr.GetBody(),
-			Title:       pr.GetTitle(),
-			URL:         pr.GetURL(),
-			Ticket:      ticket,
-		}
-
-		commits, err := GetCommitsByPullRequest(client, ctx, pullRequest)
+		prs, err := GetOrgPullRequestsByQuery(client, ctx, query, opts)
 		if err != nil {
 			return nil, err
 		}
-		pullRequest.Commits = commits
-		pullRequests = append(pullRequests, pullRequest)
+
+		for _, pr := range prs {
+			repo := getRepoName(pr.GetRepositoryURL())
+			owner := getOwner(pr.GetRepositoryURL())
+			ticket := getTicket(pr.GetTitle())
+			if len(ticket) == 0 {
+				// no ticket is present in the PR title. Skip processing
+				continue
+			}
+
+			if alreadyExists(pullRequests, pr.GetID()) {
+				continue
+			}
+
+			pullRequest := &PullRequest{
+				ID:          pr.GetID(),
+				Number:      pr.GetNumber(),
+				Owner:       owner,
+				Repo:        repo,
+				Author:      pr.GetUser().GetLogin(),
+				Created:     pr.GetCreatedAt(),
+				Description: pr.GetBody(),
+				Title:       pr.GetTitle(),
+				URL:         pr.GetURL(),
+				Ticket:      ticket,
+			}
+
+			commits, err := GetCommitsByPullRequest(client, ctx, pullRequest)
+			if err != nil {
+				return nil, err
+			}
+			pullRequest.Commits = commits
+			pullRequests = append(pullRequests, pullRequest)
+		}
 	}
 
 	return pullRequests, nil
 }
 
-func GetReviewsByPullRequest(client *github.Client, ctx context.Context, org, repo, user string, prNumber int) ([]*Review, error) {
+func alreadyExists(prs []*PullRequest, id int64) bool {
+	for _, pr := range prs {
+		if pr.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func GetReviewsByPullRequest(client *github.Client, ctx context.Context, org, repo, user string, prNumber int, date string) ([]*Review, error) {
 	GhReviews, err := GetPRReviews(client, ctx, org, repo, prNumber)
 	if err != nil {
 		return nil, err
 	}
 
 	reviews := []*Review{}
+	// filter out the reviews that don't belong to the user in question
 	for _, GhReview := range GhReviews {
-		if GhReview.GetUser().GetLogin() != user {
+		if GhReview.GetUser().GetLogin() != user || GhReview.GetSubmittedAt().Format("2006-01-02") != date {
 			continue
 		}
+
+		// fmt.Printf("NOT SKIPPING THIS REVIEW: %s\n", GhReview.String())
 
 		reviewComments, err := GetPRCommentsByReview(client, ctx, org, repo, prNumber, GhReview.GetID())
 		if err != nil {
@@ -186,7 +209,7 @@ func GetReviewsByPullRequest(client *github.Client, ctx context.Context, org, re
 
 func GetReviewedPullRequests(client *github.Client, ctx context.Context, org, user, from, to string) (map[string]*ReviewsByPullRequest, error) {
 	opts := &github.SearchOptions{Sort: "created", Order: "desc"}
-	query := fmt.Sprintf("org:%s is:pr commenter:%s -author:%s created:%s..%s updated:%s..%s", org, user, user, from, to, from, to)
+	query := fmt.Sprintf("org:%s type:pr -author:%s commenter:%s updated:%s..%s", org, user, user, from, to)
 	// fmt.Printf("query: %q\n", query)
 
 	reviewsByPR := map[string]*ReviewsByPullRequest{}
@@ -228,7 +251,7 @@ func GetReviewedPullRequests(client *github.Client, ctx context.Context, org, us
 			comments = append(comments, comment)
 		}
 
-		reviews, err := GetReviewsByPullRequest(client, ctx, owner, repo, user, pr.GetNumber())
+		reviews, err := GetReviewsByPullRequest(client, ctx, owner, repo, user, pr.GetNumber(), from)
 		if err != nil {
 			return nil, err
 		}
