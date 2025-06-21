@@ -2,11 +2,13 @@ package gh
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/go-github/v72/github"
 )
@@ -14,16 +16,32 @@ import (
 type Commit struct {
 	SHA       string
 	Author    string
-	Timestamp github.Timestamp
-	Files     []*github.CommitFile
+	Timestamp time.Time
+	Files     []*CommitFile
 	Message   string
 }
 
-func (c *Commit) String(withChanges bool) string {
-	if withChanges {
-		return fmt.Sprintf("&Commit{SHA: %s, Author: %s, Timestamp: %s, Files: %v, Message: %s}", c.SHA, c.Author, c.Timestamp.String(), c.Files, c.Message)
+type CommitFile struct {
+	SHA              string `json:"sha,omitempty"`
+	Filename         string `json:"filename,omitempty"`
+	Status           string `json:"status,omitempty"`
+	Patch            string `json:"patch,omitempty"`
+	PreviousFilename string `json:"previous_filename,omitempty"`
+}
+
+func (c *Commit) isCommitOnDate(date string) (bool, error) {
+	targetT, err := parseDate(date)
+	if err != nil {
+		return false, fmt.Errorf("invalid date string: %w", err)
 	}
-	return fmt.Sprintf("&Commit{SHA: %s, Author: %s, Timestamp: %s, Message: %s}", c.SHA, c.Author, c.Timestamp.String(), c.Message)
+
+	commitT := time.Date(c.Timestamp.Year(), c.Timestamp.Month(), c.Timestamp.Day(), 0, 0, 0, 0, time.UTC)
+	return commitT.Equal(targetT), nil
+}
+
+func (c *Commit) String(withChanges bool) string {
+	data, _ := json.MarshalIndent(c, "", "  ")
+	return string(data)
 }
 
 type PullRequest struct {
@@ -32,12 +50,15 @@ type PullRequest struct {
 	Owner       string
 	Repo        string
 	Author      string
-	Created     github.Timestamp
+	CreatedAt   time.Time
 	Description string
 	Title       string
 	URL         string
 	Commits     []*Commit
 	Ticket      string
+	Created     bool
+	Updated     bool
+	Reviewed    bool
 }
 
 type ReviewsByPullRequest struct {
@@ -53,48 +74,133 @@ type Review struct {
 }
 
 func (r *Review) String() string {
-	var builder strings.Builder
-
-	builder.WriteString(fmt.Sprintf("&Review{Summary: %v, ReviewComments: ", r.Summary))
-	for _, comment := range r.Comments {
-		builder.WriteString(fmt.Sprintf("%v", comment))
-	}
-	builder.WriteString("}")
-	return builder.String()
+	data, _ := json.MarshalIndent(r, "", "  ")
+	return string(data)
 }
 
 func (rByPR *ReviewsByPullRequest) String() string {
-	var builder strings.Builder
+	data, _ := json.MarshalIndent(rByPR, "", "  ")
+	return string(data)
+}
 
-	builder.WriteString(fmt.Sprintf("&ReviewsByPullRequest{PullRequest: %s, Reviews: ", rByPR.PullRequest.String(false)))
-	for _, review := range rByPR.Reviews {
-		builder.WriteString(review.String())
+func NewCommit(client *github.Client, ctx context.Context, repoCommit *github.RepositoryCommit, pr *PullRequest) (*Commit, error) {
+	commit, err := GetCommitContent(client, ctx, repoCommit, pr)
+	if err != nil {
+		return nil, err
 	}
-	builder.WriteString(", Comments: ")
 
-	for _, comment := range rByPR.Comments {
-		builder.WriteString(fmt.Sprintf("%v", comment))
+	files := []*CommitFile{}
+	for _, f := range commit.Files {
+		file := CommitFile{
+			SHA:              f.GetSHA(),
+			Filename:         f.GetFilename(),
+			Status:           f.GetStatus(),
+			Patch:            f.GetPatch(),
+			PreviousFilename: f.GetPreviousFilename(),
+		}
+		files = append(files, &file)
 	}
-	builder.WriteString("}")
-	return builder.String()
+
+	c := Commit{
+		SHA:       commit.GetSHA(),
+		Author:    commit.GetCommit().GetAuthor().GetName(),
+		Timestamp: commit.GetCommit().GetAuthor().GetDate().UTC(),
+		Files:     files,
+		Message:   repoCommit.GetCommit().GetMessage(),
+	}
+	return &c, nil
+}
+
+func NewPullRequest(
+	client *github.Client,
+	ctx context.Context,
+	pr *github.Issue,
+	query, date, ticketID string,
+) (*PullRequest, error) {
+
+	repo := getRepoName(pr.GetRepositoryURL())
+	owner := getOwner(pr.GetRepositoryURL())
+
+	pullRequest := PullRequest{
+		ID:          pr.GetID(),
+		Number:      pr.GetNumber(),
+		Owner:       owner,
+		Repo:        repo,
+		Author:      pr.GetUser().GetLogin(),
+		CreatedAt:   pr.GetCreatedAt().UTC(),
+		Description: pr.GetBody(),
+		Title:       pr.GetTitle(),
+		URL:         pr.GetURL(),
+		Ticket:      ticketID,
+	}
+
+	pullRequest.Created = query == "created"
+	pullRequest.Updated = query == "updated"
+	pullRequest.Reviewed = query == "reviewed"
+	return &pullRequest, nil
+}
+
+func (pr *PullRequest) FetchCommits(client *github.Client, ctx context.Context, date string) error {
+	commits, err := GetCommitsByPullRequest(client, ctx, pr, date)
+	if err != nil {
+		return err
+	}
+
+	pr.Commits = commits
+	return nil
+}
+
+func (pr *PullRequest) FetchComments(client *github.Client, ctx context.Context) ([]*github.IssueComment, error) {
+	comments, _, err := client.Issues.ListComments(ctx, pr.Owner, pr.Repo, pr.Number, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get comments for PR %d in %s/%s: %w", pr.Number, pr.Owner, pr.Repo, err)
+	}
+	return comments, nil
+}
+
+func (pr *PullRequest) FetchReviews(client *github.Client, ctx context.Context, user string, date string) ([]*Review, error) {
+	GhReviews, err := GetPRReviews(client, ctx, pr.Owner, pr.Repo, pr.Number)
+	if err != nil {
+		return nil, err
+	}
+
+	reviews := []*Review{}
+	// filter out the reviews that don't belong to the user in question
+	for _, GhReview := range GhReviews {
+		targetDate, err := parseDate(date)
+		if err != nil {
+			return nil, err
+		}
+		if GhReview.GetUser().GetLogin() != user || !GhReview.GetSubmittedAt().UTC().Equal(targetDate) {
+			continue
+		}
+
+		reviewComments, err := GetPRCommentsByReview(client, ctx, pr.Owner, pr.Repo, pr.Number, GhReview.GetID())
+		if err != nil {
+			return nil, err
+		}
+
+		reviews = append(reviews, &Review{Summary: GhReview, Comments: reviewComments})
+	}
+
+	return reviews, nil
 }
 
 func (pr *PullRequest) String(verbose bool) string {
+	// Marshal the struct to a map first
+	type Alias *PullRequest
+	base, _ := json.Marshal(Alias(pr))
+
+	var result map[string]interface{}
+	json.Unmarshal(base, &result)
+
+	// Conditionally remove fields
 	if !verbose {
-		return fmt.Sprintf("&PullRequest{Owner: %s, Repo: %s, Author: %s, Created: %s, Title: %s, URL: %s, Ticket: %s",
-			pr.Owner, pr.Repo, pr.Author, pr.Created.String(), pr.Title, pr.URL, pr.Ticket)
+		delete(result, "Commits")
 	}
 
-	var builder strings.Builder
-	str := fmt.Sprintf("&PullRequest{Owner: %s, Repo: %s, Author: %s, Created: %s, Description: %s, Title: %s, URL: %s, Ticket: %s Commits: ",
-		pr.Owner, pr.Repo, pr.Author, pr.Created.String(), pr.Description, pr.Title, pr.URL, pr.Ticket)
-	builder.WriteString(str)
-
-	for _, c := range pr.Commits {
-		builder.WriteString(fmt.Sprintf(" %s", c.String(verbose)))
-	}
-
-	return builder.String()
+	data, _ := json.MarshalIndent(result, "", "  ")
+	return string(data)
 }
 
 func (pr *PullRequest) GetPullRequestNumber() (int, error) {
@@ -117,28 +223,37 @@ func InitClient() (*github.Client, error) {
 	return client, nil
 }
 
+type Query struct {
+	Name  string
+	Query string
+}
+
 func GetPullRequestsByDate(client *github.Client, ctx context.Context, org, user, from, to string) ([]*PullRequest, error) {
 	opts := &github.SearchOptions{Sort: "created", Order: "desc"}
-	queries := []string{
-		fmt.Sprintf("org:%s type:pr author:%s created:%s..%s", org, user, from, to),
-		fmt.Sprintf("org:%s type:pr author:%s -created:%s..%s updated:%s..%s", org, user, from, to, from, to),
+	queries := []Query{
+		{
+			Name:  "created",
+			Query: fmt.Sprintf("org:%s type:pr author:%s created:%s..%s", org, user, from, to),
+		}, {
+			Name:  "updated",
+			Query: fmt.Sprintf("org:%s type:pr author:%s -created:%s..%s updated:%s..%s", org, user, from, to, from, to),
+		},
 	}
 
 	pullRequests := []*PullRequest{}
 
-	for _, query := range queries {
-		// fmt.Printf("query: %q\n", query)
+	for _, q := range queries {
+		fmt.Printf("query: %q\n", q.Name)
 
-		prs, err := GetOrgPullRequestsByQuery(client, ctx, query, opts)
+		prs, err := GetOrgPullRequestsByQuery(client, ctx, q.Query, opts)
 		if err != nil {
 			return nil, err
 		}
 
 		for _, pr := range prs {
-			repo := getRepoName(pr.GetRepositoryURL())
-			owner := getOwner(pr.GetRepositoryURL())
-			ticket := getTicket(pr.GetTitle())
-			if len(ticket) == 0 {
+
+			ticketID := getTicket(pr.GetTitle())
+			if len(ticketID) == 0 {
 				// no ticket is present in the PR title. Skip processing
 				continue
 			}
@@ -147,24 +262,14 @@ func GetPullRequestsByDate(client *github.Client, ctx context.Context, org, user
 				continue
 			}
 
-			pullRequest := &PullRequest{
-				ID:          pr.GetID(),
-				Number:      pr.GetNumber(),
-				Owner:       owner,
-				Repo:        repo,
-				Author:      pr.GetUser().GetLogin(),
-				Created:     pr.GetCreatedAt(),
-				Description: pr.GetBody(),
-				Title:       pr.GetTitle(),
-				URL:         pr.GetURL(),
-				Ticket:      ticket,
-			}
-
-			commits, err := GetCommitsByPullRequest(client, ctx, pullRequest)
+			pullRequest, err := NewPullRequest(client, ctx, pr, q.Name, from, ticketID)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("failed to instantiate a *PullRequest: %w", err)
 			}
-			pullRequest.Commits = commits
+			err = pullRequest.FetchCommits(client, ctx, from)
+			if err != nil {
+				return nil, fmt.Errorf("failed to fetch commits for PR #%d in %s/%s: %w", pullRequest.Number, pullRequest.Owner, pullRequest.Repo, err)
+			}
 			pullRequests = append(pullRequests, pullRequest)
 		}
 	}
@@ -190,11 +295,13 @@ func GetReviewsByPullRequest(client *github.Client, ctx context.Context, org, re
 	reviews := []*Review{}
 	// filter out the reviews that don't belong to the user in question
 	for _, GhReview := range GhReviews {
-		if GhReview.GetUser().GetLogin() != user || GhReview.GetSubmittedAt().Format("2006-01-02") != date {
+		targetDate, err := parseDate(date)
+		if err != nil {
+			return nil, err
+		}
+		if GhReview.GetUser().GetLogin() != user || !GhReview.GetSubmittedAt().UTC().Equal(targetDate) {
 			continue
 		}
-
-		// fmt.Printf("NOT SKIPPING THIS REVIEW: %s\n", GhReview.String())
 
 		reviewComments, err := GetPRCommentsByReview(client, ctx, org, repo, prNumber, GhReview.GetID())
 		if err != nil {
@@ -209,36 +316,28 @@ func GetReviewsByPullRequest(client *github.Client, ctx context.Context, org, re
 
 func GetReviewedPullRequests(client *github.Client, ctx context.Context, org, user, from, to string) (map[string]*ReviewsByPullRequest, error) {
 	opts := &github.SearchOptions{Sort: "created", Order: "desc"}
-	query := fmt.Sprintf("org:%s type:pr -author:%s commenter:%s updated:%s..%s", org, user, user, from, to)
-	// fmt.Printf("query: %q\n", query)
+	query := Query{
+		Name:  "reviewed",
+		Query: fmt.Sprintf("org:%s type:pr -author:%s commenter:%s updated:%s..%s", org, user, user, from, to),
+	}
+	date := from
 
 	reviewsByPR := map[string]*ReviewsByPullRequest{}
 
-	prs, err := GetOrgPullRequestsByQuery(client, ctx, query, opts)
+	prs, err := GetOrgPullRequestsByQuery(client, ctx, query.Query, opts)
 	if err != nil {
 		return nil, err
 	}
 
 	for _, pr := range prs {
-		repo := getRepoName(pr.GetRepositoryURL())
-		owner := getOwner(pr.GetRepositoryURL())
-		ticket := getTicket(pr.GetTitle())
-		pr.GetID()
+		ticketID := getTicket(pr.GetTitle())
 
-		pullRequest := &PullRequest{
-			ID:          pr.GetID(),
-			Number:      pr.GetNumber(),
-			Owner:       owner,
-			Repo:        repo,
-			Author:      pr.GetUser().GetLogin(),
-			Created:     pr.GetCreatedAt(),
-			Description: pr.GetBody(),
-			Title:       pr.GetTitle(),
-			URL:         pr.GetURL(),
-			Ticket:      ticket,
+		pullRequest, err := NewPullRequest(client, ctx, pr, query.Name, date, ticketID)
+		if err != nil {
+			return nil, err
 		}
 
-		GhComments, err := GetPRComments(client, ctx, owner, repo, pr.GetNumber())
+		GhComments, err := pullRequest.FetchComments(client, ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -251,7 +350,7 @@ func GetReviewedPullRequests(client *github.Client, ctx context.Context, org, us
 			comments = append(comments, comment)
 		}
 
-		reviews, err := GetReviewsByPullRequest(client, ctx, owner, repo, user, pr.GetNumber(), from)
+		reviews, err := pullRequest.FetchReviews(client, ctx, user, date)
 		if err != nil {
 			return nil, err
 		}
@@ -323,15 +422,10 @@ func GetOrgPullRequestsByQuery(client *github.Client, ctx context.Context, query
 		return nil, fmt.Errorf("failed to search for PRs with query %s: %w", query, err)
 	}
 
-	// fmt.Printf("total PRs: %d\n", result.GetTotal())
-
-	// for _, res := range result.Issues {
-	// 	fmt.Printf("found PR: %s\n", res.String())
-	// }
 	return result.Issues, nil
 }
 
-func GetCommitsByPullRequest(client *github.Client, ctx context.Context, pr *PullRequest) ([]*Commit, error) {
+func GetCommitsByPullRequest(client *github.Client, ctx context.Context, pr *PullRequest, date string) ([]*Commit, error) {
 	prNum, err := pr.GetPullRequestNumber()
 	if err != nil {
 		return nil, err
@@ -347,19 +441,20 @@ func GetCommitsByPullRequest(client *github.Client, ctx context.Context, pr *Pul
 
 	commits := []*Commit{}
 	for _, repoCommit := range repoCommits {
-		commit, err := GetCommitContent(client, ctx, repoCommit, pr)
+		commit, err := NewCommit(client, ctx, repoCommit, pr)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to instantiate new commit object of type %T: %w", &Commit{}, err)
 		}
 
-		c := &Commit{
-			SHA:       commit.GetSHA(),
-			Author:    commit.GetCommit().GetAuthor().GetName(),
-			Timestamp: commit.GetCommit().GetAuthor().GetDate(),
-			Files:     commit.Files,
-			Message:   repoCommit.GetCommit().GetMessage(),
+		matched, err := commit.isCommitOnDate(date)
+		if err != nil {
+			return nil, fmt.Errorf("failed to compare commit date with target date: %w", err)
 		}
-		commits = append(commits, c)
+
+		if matched {
+			commits = append(commits, commit)
+		}
+
 	}
 
 	return commits, nil
@@ -392,4 +487,12 @@ func getTicket(PRtitle string) string {
 	re := regexp.MustCompile(`[A-Z]{2,}\d{0,}-\d+`)
 	match := re.Find([]byte(PRtitle))
 	return string(match)
+}
+
+func parseDate(d string) (time.Time, error) {
+	date, err := time.Parse("2006-01-02", d)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid date string '%s': %w", d, err)
+	}
+	return date.UTC(), nil
 }
