@@ -220,20 +220,35 @@ func InitJiraClient() (*jira.Client, error) {
 	return client, err
 }
 
-func DeleteFilter(client *jira.Client, filterID string) error {
+func UpdateFilter(client *jira.Client, filter *jira.Filter, Jql string) error {
+	filterID := filter.ID
+
 	url := "/rest/api/3/filter/" + filterID
-	req, err := client.NewRequest("DEL", url, nil)
-	if err != nil {
-		return fmt.Errorf("failed to prepare a DEL request to %s to delete filter with ID %s: %w", url, filterID, err)
+	body := map[string]string{
+		"jql":  Jql,
+		"name": filter.Name,
 	}
+	data, _ := json.Marshal(body)
+
+	req, err := client.NewRequest("PUT", url, body)
+	if err != nil {
+		return fmt.Errorf("failed to prepare a PUT request to %s to update filter with ID %s: %w", url, filterID, err)
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+
+	fmt.Printf("payload for PUT: %s\n", data)
+	fmt.Printf("Host for PUT: %s\n", req.URL.Host)
+	fmt.Printf("path for PUT: %s\n", req.URL.Path)
+	fmt.Printf("headers for PUT: %v\n", req.Header)
 
 	resp, err := client.Do(req, nil)
 	if err != nil {
-		return fmt.Errorf("an API error: failed to process DEL request to %s to delete filter with ID %s: %w",
+		return fmt.Errorf("an API error: failed to process PUT request to %s to delete filter with ID %s: %w",
 			url, filterID, err)
 	}
-	if resp.StatusCode != 204 {
-		return fmt.Errorf("[%d] failed to delete filter with ID %s", resp.StatusCode, filterID)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("[%d] failed to update filter with ID %s", resp.StatusCode, filterID)
 	}
 	return nil
 }
@@ -278,6 +293,10 @@ func CreateFilter(client *jira.Client, filterName, jql string) (*jira.Filter, er
 	}
 
 	if filter != nil {
+		err := UpdateFilter(client, filter, jql)
+		if err != nil {
+			return nil, err
+		}
 		return filter, nil
 	}
 
