@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"os"
 	"perf/pkg/gh"
@@ -65,7 +66,8 @@ type Change struct {
 }
 
 func (c *Change) String() string {
-	return fmt.Sprintf("&Change{%s changed from %s to %s}", c.Field, c.From, c.To)
+	data, _ := json.MarshalIndent(c, "", "  ")
+	return string(data)
 }
 
 func (cli *ChangelogItem) String() string {
@@ -105,31 +107,13 @@ func (t *Ticket) AddPullRequest(pr *gh.PullRequest) {
 }
 
 func (t *Ticket) String() string {
-	var builder strings.Builder
-	builder.WriteString("&Ticket{Key: " + t.Key)
-	builder.WriteString(fmt.Sprintf(", Created: %v,", t.Created))
-	builder.WriteString(fmt.Sprintf("Updated: %v,", t.Updated))
-	builder.WriteString("Assignee: " + t.Assignee)
-	builder.WriteString(", Creator: " + t.Creator)
-	builder.WriteString(", Reporter: " + t.Reporter)
-	builder.WriteString(", Title: \"" + t.Title + "\"")
-	builder.WriteString(", Status: " + t.Status)
-	builder.WriteString(", Body: \"" + t.Body + "\"")
-	builder.WriteString(", Comments: {")
-	for _, comment := range t.Comments {
-		builder.WriteString(fmt.Sprintf("%s,", comment.String()))
-	}
-
-	builder.WriteString("}, &PullRequests: {")
-	for _, pr := range t.PullRequests {
-		builder.WriteString(pr.String(true))
-	}
-	builder.WriteString("}")
-	return builder.String()
+	data, _ := json.MarshalIndent(t, "", "  ")
+	return string(data)
 }
 
 func (c *Comment) String() string {
-	return fmt.Sprintf("&Comment{Author: %s, CreatedAt: %v, UpdatedAt: %v, Body: %s}", c.Author, c.CreatedAt, c.UpdatedAt, c.Body)
+	data, _ := json.MarshalIndent(c, "", "  ")
+	return string(data)
 }
 
 type FilterAlreadyExists struct {
@@ -297,6 +281,7 @@ func CreateFilter(client *jira.Client, filterName, jql string) (*jira.Filter, er
 		if err != nil {
 			return nil, err
 		}
+		fmt.Println("updated the filter")
 		return filter, nil
 	}
 
@@ -330,11 +315,9 @@ func GetTicketsByFilter(client *jira.Client, filter *Filter) ([]*Ticket, error) 
 	if err != nil {
 		return nil, fmt.Errorf("failed to get issues for filter %s: %s", jFilter.Name, err.Error())
 	}
-	// slog.Info("", slog.String("filter", jFilter.Name), slog.Int("ticket", len(issues)))
 
 	allTickets := []*Ticket{}
 	for _, issue := range issues {
-		// slog.Debug("", slog.String("filter", jFilter.Name), slog.String("ticket", issue.Key))
 
 		ticket, err := GetTicketByKey(client, issue.Key)
 		if err != nil {
@@ -378,72 +361,19 @@ func GetBoard(client *jira.Client) ([]*Ticket, error) {
 	return allTickets, nil
 }
 
-// func GetUpdatedTickets(client *jira.Client, from, to, user string) ([]*ChangelogItem, error) {
-// 	jql := fmt.Sprintf("project = DX AND updated >= \"%s\" AND updated < \"%s\" AND assignee = \"Kristina Pianykh\"", from, to)
-// 	fmt.Printf("jql: %s\n", jql)
-// 	filterName := "updatedToday"
-//
-// 	filter, err := CreateFilter(client, filterName, jql)
-// 	if err != nil {
-// 		return nil, fmt.Errorf("failed to create a filter for %s tickets: %w", filterName, err)
-// 	}
-// 	issues, err := GetIssues(client, filter, &jira.SearchOptions{Expand: "changelog"})
-// 	if err != nil {
-// 		return nil, fmt.Errorf("failed to get issues for filter %s: %s", filter.Name, err.Error())
-// 	}
-// 	// slog.Info("", slog.String("filter", filter.Name), slog.Int("ticket", len(issues)))
-//
-// 	changelog := []*ChangelogItem{}
-//
-// 	for _, issue := range issues {
-// 		// slog.Debug("", slog.String("filter", filter.Name), slog.String("ticket", issue.Key))
-// 		// fmt.Printf("%v\n", issue.Changelog.Histories)
-//
-// 		if len(issue.Changelog.Histories) == 0 {
-// 			continue
-// 		}
-//
-// 		ticket, err := GetTicketByKey(client, issue.Key)
-// 		if err != nil {
-// 			return nil, err
-// 		}
-//
-// 		changes := []*Change{}
-//
-// 		for _, history := range (*issue.Changelog).Histories {
-// 			for _, item := range history.Items {
-//
-// 				if strings.ToLower(item.Field) == "description" && history.Author.DisplayName != user {
-// 					continue
-// 				}
-//
-// 				if slices.Contains([]string{"rank", "link", "fix version", "issueparentassociation", "assignee", "remoteissuelink", "labels"}, strings.ToLower(item.Field)) {
-// 					continue
-// 				}
-//
-// 				// fmt.Printf("%v\n", item)
-// 				change := Change{Field: item.Field, From: item.FromString, To: item.ToString}
-// 				changes = append(changes, &change)
-// 			}
-// 		}
-//
-// 		changelogItem := ChangelogItem{Ticket: ticket, Changes: changes}
-// 		changelog = append(changelog, &changelogItem)
-// 	}
-// 	return changelog, nil
-// }
-
 func newTicket(jIssue *jira.Issue) (*Ticket, error) {
 	ticket := Ticket{
 		Key:      jIssue.Key,
 		Created:  time.Time(jIssue.Fields.Created),
 		Updated:  time.Time(jIssue.Fields.Updated),
-		Assignee: jIssue.Fields.Assignee.DisplayName,
 		Creator:  jIssue.Fields.Creator.DisplayName,
 		Reporter: jIssue.Fields.Reporter.DisplayName,
 		Title:    jIssue.Fields.Summary,
 		Status:   jIssue.Fields.Status.Name,
 		Body:     jIssue.Fields.Description,
+	}
+	if jIssue.Fields.Assignee != nil {
+		ticket.Assignee = jIssue.Fields.Assignee.DisplayName
 	}
 
 	if jIssue.Fields.Comments != nil {
