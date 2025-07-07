@@ -32,5 +32,6 @@ go.work.sum
 # Build directory
 build
 
-**/prompt
+**/*prompt*
 log.md
+summary.md
